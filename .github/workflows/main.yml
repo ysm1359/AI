@@ -1,0 +1,29 @@
+name: Download Model to Google Drive
+
+on:
+  workflow_dispatch: # این باعث می‌شود شما با زدن یک دکمه دستی اجرا کنید
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install huggingface_hub
+        run: pip install huggingface_hub
+
+      - name: Download Model from Hugging Face
+        run: |
+          # جایگزین کردن نام مدل دقیق
+          python -c "from huggingface_hub import snapshot_download; snapshot_download(repo_id='ACE-Step-1.5-Repo-Name', local_dir='./model_files')"
+
+      - name: Setup rclone
+        uses: rclone/rclone@v3
+
+      - name: Sync to Google Drive
+        run: |
+          # فرض بر این است که شما تنظیمات rclone را در Secrets قرار داده‌اید
+          mkdir -p ~/.config/rclone
+          echo "${{ secrets.RCLONE_CONFIG }}" > ~/.config/rclone/rclone.conf
+          rclone copy ./model_files mydrive:ACE_Step_Models
