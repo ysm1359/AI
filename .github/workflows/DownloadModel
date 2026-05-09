@@ -1,0 +1,278 @@
+name: Download Model via Colab and Upload to Google Drive
+
+on:
+  workflow_dispatch:  # اجرای دستی توسط تو
+    inputs:
+      model_url:
+        description: 'لینک مستقیم دانلود مدل (یا هر فایل دیگه)'
+        required: true
+        default: 'https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors'
+        type: string
+      output_filename:
+        description: 'model.safetensors'
+        required: true
+        default: 'model.bin'
+        type: string
+      drive_folder_id:
+        description: 'آیدی پوشه گوگل درایو (اختیاری، خالی بذار root)'
+        required: false
+        default: ''
+        type: string
+
+jobs:
+  run-colab-download:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install dependencies
+        run: |
+          pip install requests nbformat google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client
+
+      - name: Create and execute Colab notebook
+        env:
+          MODEL_URL: ${{ github.event.inputs.model_url }}
+          OUTPUT_NAME: ${{ github.event.inputs.output_filename }}
+          DRIVE_FOLDER: ${{ github.event.inputs.drive_folder_id }}
+        run: |
+          python << 'EOF'
+          import json
+          import subprocess
+          import sys
+          import os
+
+          model_url = os.environ.get('MODEL_URL', '')
+          output_name = os.environ.get('OUTPUT_NAME', 'downloaded_file')
+          drive_folder = os.environ.get('DRIVE_FOLDER', '')
+
+          # ساخت نوت‌بوک کولب
+          notebook = {
+              "cells": [
+                  {
+                      "cell_type": "markdown",
+                      "source": ["# Download Model and Upload to Google Drive\n"]
+                  },
+                  {
+                      "cell_type": "code",
+                      "source": [
+                          "# نصب کتابخانه گوگل درایو\n",
+                          "!pip install -U google-auth google-auth-oauthlib google-auth-httplib2 google-api-python-client\n"
+                      ],
+                      "metadata": {},
+                      "execution_count": None,
+                      "outputs": []
+                  },
+                  {
+                      "cell_type": "code",
+                      "source": [
+                          "# اتصال به گوگل درایو\n",
+                          "from google.colab import drive\n",
+                          "drive.mount('/content/drive')\n"
+                      ],
+                      "metadata": {},
+                      "execution_count": None,
+                      "outputs": []
+                  },
+                  {
+                      "cell_type": "code",
+                      "source": [
+                          "import os\n",
+                          "import requests\n",
+                          "from tqdm import tqdm\n",
+                          "import time\n",
+                          "\n",
+                          "# لینک مدل از ورودی workflow\n",
+                          f"MODEL_URL = '{model_url}'\n",
+                          f"OUTPUT_FILE = '{output_name}'\n",
+                          f"DRIVE_FOLDER_ID = '{drive_folder}' if '{drive_folder}' else ''\n",
+                          "\n",
+                          "print(f'Starting download from: {MODEL_URL}')\n",
+                          "print(f'Output file: {OUTPUT_FILE}')\n"
+                      ],
+                      "metadata": {},
+                      "execution_count": None,
+                      "outputs": []
+                  },
+                  {
+                      "cell_type": "code",
+                      "source": [
+                          "# دانلود فایل با نمایش进度\n",
+                          "def download_file(url, filename):\n",
+                          "    response = requests.get(url, stream=True)\n",
+                          "    total_size = int(response.headers.get('content-length', 0))\n",
+                          "    \n",
+                          "    with open(filename, 'wb') as f:\n",
+                          "        with tqdm(total=total_size, unit='B', unit_scale=True, desc=filename) as pbar:\n",
+                          "            for chunk in response.iter_content(chunk_size=8192):\n",
+                          "                f.write(chunk)\n",
+                          "                pbar.update(len(chunk))\n",
+                          "    \n",
+                          "    return filename\n",
+                          "\n",
+                          "try:\n",
+                          "    print('Downloading...')\n",
+                          "    downloaded_file = download_file(MODEL_URL, OUTPUT_FILE)\n",
+                          "    file_size = os.path.getsize(downloaded_file)\n",
+                          "    print(f'Download completed! Size: {file_size / (1024**2):.2f} MB')\n",
+                          "except Exception as e:\n",
+                          "    print(f'Download failed: {e}')\n",
+                          "    raise e\n"
+                      ],
+                      "metadata": {},
+                      "execution_count": None,
+                      "outputs": []
+                  },
+                  {
+                      "cell_type": "code",
+                      "source": [
+                          "# آپلود به گوگل درایو\n",
+                          "from google.colab import files\n",
+                          "import shutil\n",
+                          "\n",
+                          "def upload_to_drive(file_path, folder_id=''):\n",
+                          "    \"\"\"آپلود فایل به گوگل درایو\"\"\"\n",
+                          "    destination = '/content/drive/MyDrive/'\n",
+                          "    \n",
+                          "    if folder_id:\n",
+                          "        # اگر آیدی پوشه داده شده، به آن پوشه برو\n",
+                          "        destination += f'.shortcut-targets-by-id/{folder_id}/'\n",
+                          "    \n",
+                          "    destination_path = os.path.join(destination, os.path.basename(file_path))\n",
+                          "    \n",
+                          "    # کپی فایل\n",
+                          "    shutil.copy2(file_path, destination_path)\n",
+                          "    print(f'File uploaded to: {destination_path}')\n",
+                          "    return destination_path\n",
+                          "\n",
+                          "try:\n",
+                          "    drive_path = upload_to_drive(downloaded_file, DRIVE_FOLDER_ID)\n",
+                          "    print(f'Successfully uploaded to Google Drive: {drive_path}')\n",
+                          "    \n",
+                          "    # ایجاد لینک قابل اشتراک‌گذاری\n",
+                          "    file_id = drive_path.split('/')[-1]\n",
+                          "    print(f'\\n=== DRIVE_LINK ===')\n",
+                          "    print(f'https://drive.google.com/file/d/{file_id}/view?usp=sharing')\n",
+                          "    print(f'=== END_DRIVE_LINK ===')\n",
+                          "except Exception as e:\n",
+                          "    print(f'Upload failed: {e}')\n",
+                          "    raise e\n"
+                      ],
+                      "metadata": {},
+                      "execution_count": None,
+                      "outputs": []
+                  },
+                  {
+                      "cell_type": "code",
+                      "source": [
+                          "# نمایش اطلاعات نهایی\n",
+                          "import hashlib\n",
+                          "\n",
+                          "# محاسبه hash فایل برای اطمینان از完整性\n",
+                          "def get_file_hash(filename):\n",
+                          "    sha256_hash = hashlib.sha256()\n",
+                          "    with open(filename, \"rb\") as f:\n",
+                          "        for byte_block in iter(lambda: f.read(4096), b\"\"):\n",
+                          "            sha256_hash.update(byte_block)\n",
+                          "    return sha256_hash.hexdigest()\n",
+                          "\n",
+                          "file_hash = get_file_hash(downloaded_file)\n",
+                          "print(f'\\nFile SHA256: {file_hash}')\n",
+                          "print('\\n✅ All operations completed successfully!')\n"
+                      ],
+                      "metadata": {},
+                      "execution_count": None,
+                      "outputs": []
+                  }
+              ],
+              "metadata": {
+                  "kernelspec": {
+                      "display_name": "Python 3",
+                      "name": "python3"
+                  },
+                  "colab": {
+                      "provenance": [],
+                      "name": "Model Downloader"
+                  }
+              },
+              "nbformat": 4,
+              "nbformat_minor": 4
+          }
+
+          # ذخیره نوت‌بوک
+          with open('downloader.ipynb', 'w') as f:
+              json.dump(notebook, f)
+
+          print("✅ Notebook created: downloader.ipynb")
+
+          # روش جایگزین: از colab CLI استفاده کنیم
+          # ابتدا colabtools رو نصب می‌کنیم
+          subprocess.run([sys.executable, '-m', 'pip', 'install', 'colabtools'], capture_output=True)
+
+          # اجرای نوت‌بوک با استفاده از colab
+          # توجه: اجرای کامل کولب نیاز به authentication داره
+          # یه روش ساده‌تر: لینک کولب رو به خروجی می‌دیم تا خودت اجرا کنی
+
+          print("\n" + "="*50)
+          print("⚠️ IMPORTANT NOTE:")
+          print("Colab notebooks require manual authentication for Drive access.")
+          print("You need to run the notebook manually from this link:")
+          print("\n👉 Method 1: Upload the notebook to your own Google Colab")
+          print("   1. Download 'downloader.ipynb' from the artifacts")
+          print("   2. Go to https://colab.research.google.com/")
+          print("   3. Upload the notebook")
+          print("   4. Run the cells one by one")
+          print("   5. Grant permission when asked for Drive access")
+          print("\n👉 Method 2: Use direct link (after uploading to a public gist)")
+          print("="*50)
+
+          EOF
+
+      - name: Upload notebook as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: colab-notebook
+          path: |
+            downloader.ipynb
+            *.ipynb
+          if-no-files-found: error
+
+      - name: Create execution instructions
+        run: |
+          cat << 'INSTRUCTIONS' > HOW_TO_USE.txt
+          ========================================
+          How to Use This Colab Notebook
+          ========================================
+          
+          1. Download 'downloader.ipynb' from workflow artifacts
+          
+          2. Go to https://colab.research.google.com/
+          
+          3. Click File → Upload Notebook → Select 'downloader.ipynb'
+          
+          4. Run the cells in order (click the ▶️ button on each cell)
+          
+          5. When you see "drive.mount()", click the link, authorize with your Google account,
+             copy the authorization code, paste it back in Colab, and press Enter
+          
+          6. After successful authentication, the model will download to your Drive
+          
+          7. File will be saved in: MyDrive/ (or your specified folder)
+          
+          ========================================
+          Model URL: ${{ github.event.inputs.model_url }}
+          Output file: ${{ github.event.inputs.output_filename }}
+          Drive folder ID: ${{ github.event.inputs.drive_folder_id }}
+          ========================================
+          INSTRUCTIONS
+
+      - name: Upload instructions
+        uses: actions/upload-artifact@v4
+        with:
+          name: instructions
+          path: HOW_TO_USE.txt
