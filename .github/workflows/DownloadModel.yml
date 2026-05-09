@@ -30,12 +30,14 @@ jobs:
       - name: Split into chunks
         run: |
           CHUNK_SIZE=$(( ${{ github.event.inputs.chunk_size_mb }} * 1024 * 1024 ))
-          split -b $CHUNK_SIZE model.safetensors chunk_
+          split -b $CHUNK_SIZE model.safetensors part_
           
-          # Rename chunks with better names
+          # Rename chunks with proper numbering
           n=1
-          for f in chunk_*; do
-            mv "$f" "part_$(printf "%03d" $n).part"
+          for f in part_*; do
+            if [[ "$f" != "part_"* ]] || [[ "$f" == "part_" ]]; then continue; fi
+            newname=$(printf "part_%03d.part" $n)
+            mv "$f" "$newname"
             n=$((n+1))
           done
           
@@ -51,46 +53,69 @@ jobs:
           sha256sum -c checksum.txt
           if [ $? -eq 0 ]; then
             echo "✅ Success! File is intact."
+            ls -lh model.safetensors
           else
             echo "❌ Checksum failed. File is corrupted."
           fi
           EOF
           chmod +x reassemble.sh
           
-          echo "Split into $(ls part_*.part | wc -l) chunks"
+          echo "Split into $(ls part_*.part 2>/dev/null | wc -l) chunks"
 
-      - name: Create branch for chunks
+      - name: Create and switch to chunks branch
         run: |
           git checkout --orphan model-chunks
           git rm -rf . 2>/dev/null || true
-          mv part_*.part reassemble.sh checksum.txt .
-          git add part_*.part reassemble.sh checksum.txt
-          git commit -m "Model chunks - $(date)"
+          # Remove workflow files from chunks branch
+          rm -rf .github 2>/dev/null || true
+          # Copy only the chunk files
+          cp ../part_*.part . 2>/dev/null || true
+          cp ../reassemble.sh . 2>/dev/null || true
+          cp ../checksum.txt . 2>/dev/null || true
+          
+          # Add all files
+          git add part_*.part reassemble.sh checksum.txt 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git commit -m "Add model chunks - $(date +'%Y-%m-%d %H:%M:%S')"
           git push origin model-chunks --force
 
       - name: Create info file on main branch
         run: |
           git checkout main
+          
           cat > MODEL_INFO.md << EOF
           # Model Download Info
           
           - **Original URL:** ${{ github.event.inputs.model_url }}
-          - **Total chunks:** $(ls ../part_*.part | wc -l) chunks of ${{ github.event.inputs.chunk_size_mb }}MB each
+          - **Total size:** 4.5GB
+          - **Chunks:** 95MB each
           - **Branch name:** \`model-chunks\`
           
           ## How to download (you have internet only for GitHub):
           
-          1. \`git clone --branch model-chunks https://github.com/${{ github.repository }}.git model-files\`
-          2. \`cd model-files\`
-          3. \`bash reassemble.sh\`
-          4. Done! The file \`model.safetensors\` will be created.
+          ### Method 1: Clone the branch (recommended)
+          \`\`\`bash
+          git clone --branch model-chunks https://github.com/${{ github.repository }}.git model-files
+          cd model-files
+          bash reassemble.sh
+          \`\`\`
           
-          ## Manual download:
+          ### Method 2: Download individual chunks from browser
+          Go to: https://github.com/${{ github.repository }}/tree/model-chunks
           
-          You can also download each \`.part\` file individually from GitHub UI:
-          https://github.com/${{ github.repository }}/tree/model-chunks
+          Download all \`.part\` files, then run:
+          \`\`\`bash
+          cat part_*.part > model.safetensors
+          sha256sum -c checksum.txt
+          \`\`\`
+          
+          ## Checksum (for verification)
+          \`\`\`
+          $(cat checksum.txt)
+          \`\`\`
           EOF
           
           git add MODEL_INFO.md
-          git commit -m "Add model info" || echo "No changes"
+          git commit -m "Add model download instructions" || echo "No changes to commit"
           git push origin main
