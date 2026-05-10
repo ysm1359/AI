@@ -14,7 +14,7 @@ jobs:
 
       - name: Download the 4.5GB model
         run: |
-          echo "Downloading model... (این مرحله ممکن است 15-20 دقیقه طول بکشد)"
+          echo "Downloading model... (15-20 minutes)"
           wget -O model.safetensors "https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors"
           ls -lh model.safetensors
 
@@ -23,64 +23,47 @@ jobs:
           echo "Splitting file into 95MB chunks..."
           split -b 95m model.safetensors part_
           
-          # Rename files for easier use
           n=1
           for f in part_*; do 
             mv "$f" "part_$(printf "%03d" $n).part"
             n=$((n+1))
           done
           
-          # Create checksum file for verification
           sha256sum model.safetensors > checksum.txt
           
-          # Create a script to reassemble the file on your system
           cat > reassemble.sh << 'EOF'
           #!/bin/bash
-          echo "Reassembling model.safetensors. Please wait..."
+          echo "Reassembling model.safetensors..."
           cat part_*.part > model.safetensors
-          echo "Checking file integrity..."
+          echo "Verifying..."
           sha256sum -c checksum.txt
           if [ $? -eq 0 ]; then
-            echo "✅ Success! The file 'model.safetensors' has been recreated correctly."
+            echo "✅ Success!"
             ls -lh model.safetensors
           else
-            echo "❌ Error: File is corrupted. Please download all parts again."
+            echo "❌ Error: File corrupted"
           fi
           EOF
           chmod +x reassemble.sh
           
-          echo "Total chunks created: $(ls part_*.part | wc -l)"
+          echo "Total chunks: $(ls part_*.part | wc -l)"
 
-      - name: Upload chunks to a new branch
+      - name: Create branch and upload chunks
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Check if branch exists and create/switch accordingly
-          if git ls-remote --heads origin model-files | grep -q model-files; then
-            git checkout model-files
-            git pull origin model-files --ff-only
-          else
-            git checkout --orphan model-files
-            git rm -rf . 2>/dev/null || true
-          fi
+          # Create orphan branch (no history)
+          git checkout --orphan model-files
           
-          # Copy chunk files to the working directory
-          cp ../part_*.part . 2>/dev/null || cp part_*.part .
-          cp ../reassemble.sh . 2>/dev/null || cp reassemble.sh .
-          cp ../checksum.txt . 2>/dev/null || cp checksum.txt .
+          # Remove all workflow files
+          rm -rf .github 2>/dev/null || true
           
-          # Add all chunk files
+          # Add only the chunk files
           git add part_*.part reassemble.sh checksum.txt
-          git commit -m "Add model chunks for download - $(date +'%Y-%m-%d %H:%M:%S')"
+          git commit -m "Add model chunks"
           git push origin model-files --force
           
-          echo "=================================================="
-          echo "✅ Workflow completed successfully!"
-          echo "Branch 'model-files' now contains all 49 chunks."
-          echo ""
-          echo "To download on your system:"
-          echo "git clone --branch model-files https://github.com/${{ github.repository }}.git model-download"
-          echo "cd model-download"
-          echo "bash reassemble.sh"
-          echo "=================================================="
+          echo "=========================================="
+          echo "✅ DONE! Branch 'model-files' is ready."
+          echo "=========================================="
