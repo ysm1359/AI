@@ -1,0 +1,155 @@
+name: Download and Split Any File to Git Branch
+
+on:
+  workflow_dispatch:
+    inputs:
+      file_url:
+        description: 'لینک مستقیم فایل مورد نظر (مثل: https://example.com/file.bin)'
+        required: true
+        type: string
+      file_name:
+        description: 'نام فایل خروجی (مثل: model.safetensors)'
+        required: true
+        type: string
+      chunk_size_mb:
+        description: 'سایز هر قطعه به مگابایت (پیشنهاد: 95)'
+        required: false
+        default: '95'
+        type: string
+      branch_name:
+        description: 'نام برنچ مقصد (پیشنهاد: model-files)'
+        required: false
+        default: 'model-files'
+        type: string
+
+jobs:
+  split-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download file from URL
+        run: |
+          echo "=========================================="
+          echo "Starting download from: ${{ github.event.inputs.file_url }}"
+          echo "File name: ${{ github.event.inputs.file_name }}"
+          echo "=========================================="
+          
+          wget --progress=dot:giga -O "${{ github.event.inputs.file_name }}" "${{ github.event.inputs.file_url }}"
+          
+          if [ $? -ne 0 ]; then
+            echo "❌ Download failed!"
+            exit 1
+          fi
+          
+          echo "✅ Download completed:"
+          ls -lh "${{ github.event.inputs.file_name }}"
+
+      - name: Split file into chunks
+        run: |
+          FILE_NAME="${{ github.event.inputs.file_name }}"
+          CHUNK_SIZE="${{ github.event.inputs.chunk_size_mb }}"
+          BRANCH_NAME="${{ github.event.inputs.branch_name }}"
+          
+          echo "Splitting $FILE_NAME into ${CHUNK_SIZE}MB chunks..."
+          split -b ${CHUNK_SIZE}m "$FILE_NAME" chunk_
+          
+          # Rename chunks with proper numbering
+          n=1
+          for f in chunk_*; do
+            new_name=$(printf "${FILE_NAME}_part_%03d.part" $n)
+            mv "$f" "$new_name"
+            n=$((n+1))
+          done
+          
+          # Create checksum
+          sha256sum "$FILE_NAME" > "${FILE_NAME}.checksum.txt"
+          
+          # Create reassemble script
+          cat > "reassemble_${FILE_NAME}.sh" << EOF
+          #!/bin/bash
+          echo "Reassembling ${FILE_NAME}..."
+          cat ${FILE_NAME}_part_*.part > "${FILE_NAME}"
+          echo "Verifying integrity..."
+          sha256sum -c "${FILE_NAME}.checksum.txt"
+          if [ \$? -eq 0 ]; then
+            echo "✅ Success! File is intact."
+            ls -lh "${FILE_NAME}"
+          else
+            echo "❌ Error: File corrupted"
+          fi
+          EOF
+          chmod +x "reassemble_${FILE_NAME}.sh"
+          
+          TOTAL_CHUNKS=$(ls ${FILE_NAME}_part_*.part | wc -l)
+          echo "Total chunks created: $TOTAL_CHUNKS"
+          
+          # Save metadata
+          cat > "info_${FILE_NAME}.txt" << EOF
+          File: ${FILE_NAME}
+          Original URL: ${{ github.event.inputs.file_url }}
+          Chunk size: ${CHUNK_SIZE}MB
+          Total chunks: ${TOTAL_CHUNKS}
+          Date: $(date)
+          Branch: ${BRANCH_NAME}
+          EOF
+
+      - name: Create/switch to target branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          BRANCH="${{ github.event.inputs.branch_name }}"
+          
+          # Check if branch exists
+          if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
+            git checkout "$BRANCH"
+          else
+            git checkout --orphan "$BRANCH"
+            rm -rf .github 2>/dev/null || true
+          fi
+
+      - name: Upload chunks in batches
+        run: |
+          FILE_NAME="${{ github.event.inputs.file_name }}"
+          BRANCH="${{ github.event.inputs.branch_name }}"
+          
+          # First, upload checksum, script, and info
+          git add "${FILE_NAME}.checksum.txt" "reassemble_${FILE_NAME}.sh" "info_${FILE_NAME}.txt"
+          git commit -m "Add metadata for ${FILE_NAME}" || echo "No metadata to commit"
+          git push origin "$BRANCH"
+          
+          # Upload chunks in batches of 5
+          files=()
+          count=0
+          for f in ${FILE_NAME}_part_*.part; do
+            files+=("$f")
+            count=$((count+1))
+            if [ $count -eq 5 ]; then
+              git add "${files[@]}"
+              git commit -m "Add chunks for ${FILE_NAME} - batch $(date +%s)"
+              git push origin "$BRANCH"
+              files=()
+              count=0
+            fi
+          done
+          
+          # Upload remaining chunks
+          if [ $count -gt 0 ]; then
+            git add "${files[@]}"
+            git commit -m "Add remaining chunks for ${FILE_NAME}"
+            git push origin "$BRANCH"
+          fi
+          
+          echo "=========================================="
+          echo "✅ DONE! All chunks for ${FILE_NAME} uploaded to branch: ${BRANCH}"
+          echo "=========================================="
+          echo ""
+          echo "📥 Download instructions:"
+          echo "git clone --branch ${BRANCH} https://github.com/${{ github.repository }}.git downloaded-files"
+          echo "cd downloaded-files"
+          echo "bash reassemble_${FILE_NAME}.sh"
+          echo "=========================================="
