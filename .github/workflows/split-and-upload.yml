@@ -1,0 +1,68 @@
+name: Split and Upload Large Model to Git Branch
+
+on:
+  workflow_dispatch:
+
+jobs:
+  split-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download the 4.5GB model
+        run: |
+          echo "Downloading model... (این مرحله ممکن است 15-20 دقیقه طول بکشد)"
+          wget -O model.safetensors "https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors"
+          ls -lh model.safetensors
+
+      - name: Split into 95MB chunks
+        run: |
+          echo "Splitting file into 95MB chunks..."
+          split -b 95m model.safetensors part_
+          
+          # Rename files for easier use
+          n=1
+          for f in part_*; do 
+            mv "$f" "part_$(printf "%03d" $n).part"
+            n=$((n+1))
+          done
+          
+          # Create checksum file for verification
+          sha256sum model.safetensors > checksum.txt
+          
+          # Create a script to reassemble the file on your system
+          cat > reassemble.sh << 'EOF'
+          #!/bin/bash
+          echo "Reassembling model.safetensors. Please wait..."
+          cat part_*.part > model.safetensors
+          echo "Checking file integrity..."
+          sha256sum -c checksum.txt
+          if [ $? -eq 0 ]; then
+            echo "✅ Success! The file 'model.safetensors' has been recreated correctly."
+            ls -lh model.safetensors
+          else
+            echo "❌ Error: File is corrupted. Please download all parts again."
+          fi
+          EOF
+          chmod +x reassemble.sh
+          
+          echo "Total chunks created: $(ls part_*.part | wc -l)"
+
+      - name: Upload chunks to a new branch
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          
+          # Create or switch to the 'model-files' branch
+          git checkout --orphan model-files
+          git rm -rf . 2>/dev/null || true
+          
+          # Add all chunk files
+          git add part_*.part reassemble.sh checksum.txt
+          git commit -m "Add model chunks for download"
+          git push origin model-files --force
+          
+          echo "=================================================="
+          echo "✅ Workflow completed successfully!"
+          echo "You can now download the file by following the instructions below."
+          echo "=================================================="
