@@ -1,0 +1,53 @@
+name: Split and Upload Large Model as Artifact
+
+on:
+  workflow_dispatch:
+
+jobs:
+  split-and-upload:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download the model
+        run: |
+          echo "Downloading model..."
+          wget -O model.safetensors "https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors"
+          ls -lh model.safetensors
+
+      - name: Split into 95MB chunks
+        run: |
+          echo "Splitting file..."
+          split -b 95m model.safetensors part_
+          
+          n=1
+          for f in part_*; do 
+            mv "$f" "part_$(printf "%03d" $n).part"
+            n=$((n+1))
+          done
+          
+          sha256sum model.safetensors > checksum.txt
+          
+          cat > reassemble.sh << 'EOF'
+          #!/bin/bash
+          echo "Reassembling model.safetensors..."
+          cat part_*.part > model.safetensors
+          echo "Verifying..."
+          sha256sum -c checksum.txt
+          if [ $? -eq 0 ]; then
+            echo "✅ Success! File is intact."
+            ls -lh model.safetensors
+          else
+            echo "❌ Error: File corrupted"
+          fi
+          EOF
+          chmod +x reassemble.sh
+          
+          # ایجاد فایل زیپ نهایی از همه قطعات
+          zip -r model_chunks.zip part_*.part reassemble.sh checksum.txt
+          echo "Created model_chunks.zip"
+
+      - name: Upload single zip file as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-split-zip
+          path: model_chunks.zip
+          if-no-files-found: error
