@@ -9,6 +9,9 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
       - name: Download the 4.5GB model
         run: |
           echo "Downloading model... (این مرحله ممکن است 15-20 دقیقه طول بکشد)"
@@ -53,16 +56,31 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # Create or switch to the 'model-files' branch
-          git checkout --orphan model-files
-          git rm -rf . 2>/dev/null || true
+          # Check if branch exists and create/switch accordingly
+          if git ls-remote --heads origin model-files | grep -q model-files; then
+            git checkout model-files
+            git pull origin model-files --ff-only
+          else
+            git checkout --orphan model-files
+            git rm -rf . 2>/dev/null || true
+          fi
+          
+          # Copy chunk files to the working directory
+          cp ../part_*.part . 2>/dev/null || cp part_*.part .
+          cp ../reassemble.sh . 2>/dev/null || cp reassemble.sh .
+          cp ../checksum.txt . 2>/dev/null || cp checksum.txt .
           
           # Add all chunk files
           git add part_*.part reassemble.sh checksum.txt
-          git commit -m "Add model chunks for download"
+          git commit -m "Add model chunks for download - $(date +'%Y-%m-%d %H:%M:%S')"
           git push origin model-files --force
           
           echo "=================================================="
           echo "✅ Workflow completed successfully!"
-          echo "You can now download the file by following the instructions below."
+          echo "Branch 'model-files' now contains all 49 chunks."
+          echo ""
+          echo "To download on your system:"
+          echo "git clone --branch model-files https://github.com/${{ github.repository }}.git model-download"
+          echo "cd model-download"
+          echo "bash reassemble.sh"
           echo "=================================================="
