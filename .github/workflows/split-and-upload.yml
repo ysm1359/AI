@@ -14,13 +14,12 @@ jobs:
 
       - name: Download the 4.5GB model
         run: |
-          echo "Downloading model... (15-20 minutes)"
+          echo "Downloading model..."
           wget -O model.safetensors "https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors"
           ls -lh model.safetensors
 
       - name: Split into 95MB chunks
         run: |
-          echo "Splitting file into 95MB chunks..."
           split -b 95m model.safetensors part_
           
           n=1
@@ -48,22 +47,42 @@ jobs:
           
           echo "Total chunks: $(ls part_*.part | wc -l)"
 
-      - name: Create branch and upload chunks
+      - name: Create orphan branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          
-          # Create orphan branch (no history)
           git checkout --orphan model-files
-          
-          # Remove all workflow files
           rm -rf .github 2>/dev/null || true
-          
-          # Add only the chunk files
-          git add part_*.part reassemble.sh checksum.txt
-          git commit -m "Add model chunks"
+
+      - name: Push chunks one by one (分批推送)
+        run: |
+          # اول checksum و reassemble.sh را بفرست
+          git add checksum.txt reassemble.sh
+          git commit -m "Add checksum and reassemble script"
           git push origin model-files --force
           
+          # سپس هر 5 قطعه را با هم بفرست (هر بار حدود 475MB)
+          files=()
+          count=0
+          for f in part_*.part; do
+            files+=("$f")
+            count=$((count+1))
+            if [ $count -eq 5 ]; then
+              git add "${files[@]}"
+              git commit -m "Add chunks batch $(date +%s)"
+              git push origin model-files
+              files=()
+              count=0
+            fi
+          done
+          
+          # باقیمانده را بفرست
+          if [ $count -gt 0 ]; then
+            git add "${files[@]}"
+            git commit -m "Add remaining chunks"
+            git push origin model-files
+          fi
+          
           echo "=========================================="
-          echo "✅ DONE! Branch 'model-files' is ready."
+          echo "✅ DONE! All chunks uploaded successfully."
           echo "=========================================="
