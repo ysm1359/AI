@@ -1,0 +1,120 @@
+name: Download and Convert to Base64 Text Files
+
+on:
+  workflow_dispatch:
+    inputs:
+      model_url:
+        description: 'Direct download link'
+        required: true
+        default: 'https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors'
+
+jobs:
+  convert-and-save:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download model
+        run: |
+          echo "Downloading 4.5GB model..."
+          wget --progress=dot:giga -O model.safetensors "${{ github.event.inputs.model_url }}"
+          ls -lh model.safetensors
+
+      - name: Split into 95MB chunks and convert to base64
+        run: |
+          # Split into 95MB chunks
+          split -b 95m model.safetensors chunk_
+          
+          # Convert each chunk to base64 text file
+          n=1
+          for f in chunk_*; do
+            output_file="part_$(printf "%03d" $n).txt"
+            echo "Converting $f to $output_file..."
+            base64 -w 0 "$f" > "$output_file"
+            n=$((n+1))
+          done
+          
+          # Create checksum of original file
+          sha256sum model.safetensors > checksum.txt
+          
+          # Create reassemble script
+          cat > reassemble.sh << 'EOF'
+          #!/bin/bash
+          echo "Reassembling model.safetensors from base64 text files..."
+          
+          # Convert each text file back to binary chunk
+          for txt in part_*.txt; do
+            chunk_file="${txt%.txt}.chunk"
+            echo "Decoding $txt..."
+            base64 -d "$txt" > "$chunk_file"
+          done
+          
+          # Combine chunks
+          cat part_*.chunk > model.safetensors
+          
+          # Clean up
+          rm part_*.chunk
+          
+          # Verify
+          echo "Verifying integrity..."
+          sha256sum -c checksum.txt
+          
+          if [ $? -eq 0 ]; then
+            echo "✅ Success! File is intact."
+            ls -lh model.safetensors
+          else
+            echo "❌ Checksum failed!"
+          fi
+          EOF
+          chmod +x reassemble.sh
+          
+          echo "Created $(ls part_*.txt | wc -l) base64 text files"
+          
+          # Create a zip file of all text files (easier to download)
+          zip -r model-base64-files.zip part_*.txt reassemble.sh checksum.txt
+
+      - name: Upload individual text files
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-base64-parts
+          path: |
+            part_*.txt
+            reassemble.sh
+            checksum.txt
+          if-no-files-found: error
+
+      - name: Upload single zip file
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-base64-complete
+          path: model-base64-files.zip
+          if-no-files-found: error
+
+      - name: Create and upload split zip files (100MB each)
+        run: |
+          # Split the zip into 100MB parts for easier download
+          split -b 100m model-base64-files.zip zip_part_
+          
+          n=1
+          for f in zip_part_*; do
+            mv "$f" "download_part_$(printf "%03d" $n).zip"
+            n=$((n+1))
+          done
+          
+          echo "Split into $(ls download_part_*.zip | wc -l) parts"
+          
+          # Create a script to combine zip parts
+          cat > combine_zips.sh << 'EOF'
+          #!/bin/bash
+          echo "Combining zip parts..."
+          cat download_part_*.zip > model-base64-files.zip
+          echo "Done. Run: unzip model-base64-files.zip"
+          EOF
+          chmod +x combine_zips.sh
+
+      - name: Upload split zip parts
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-split-zip
+          path: |
+            download_part_*.zip
+            combine_zips.sh
+          if-no-files-found: error
