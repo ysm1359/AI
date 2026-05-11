@@ -1,117 +1,94 @@
-name: Download & Split Any File (Stable)
+name: Stable Download and Split Any File
 
 on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: 'لینک مستقیم فایل برای دانلود'
+        description: 'لینک مستقیم فایل'
         required: true
         type: string
-        default: 'https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors'
       file_name:
-        description: 'نام فایل خروجی (مثل my_model.safetensors)'
+        description: 'نام فایل خروجی'
         required: true
         type: string
-        default: 'my_model.safetensors'
       branch_name:
-        description: 'نام برنچ در گیت‌هاب (پیشنهاد: model-files)'
-        required: false
+        description: 'اسم برنچ در گیت‌هاب'
+        required: true
         type: string
-        default: 'model-files'
+        default: 'downloads'
       chunk_size_mb:
-        description: 'سایز هر قطعه به مگابایت (پیشنهاد: 95)'
+        description: 'سایز هر قطعه (MB)'
         required: false
         type: string
         default: '95'
 
 jobs:
-  split-and-push:
+  process:
     runs-on: ubuntu-latest
     permissions:
       contents: write
     steps:
-      - name: Checkout repository
+      - name: Get the code
         uses: actions/checkout@v4
 
-      - name: Download file from URL
+      - name: Download file (with resume)
         run: |
-          echo "=========================================="
-          echo "Downloading from: ${{ github.event.inputs.file_url }}"
-          echo "Saving as: ${{ github.event.inputs.file_name }}"
-          echo "=========================================="
-          wget -c --progress=dot:giga -O "${{ github.event.inputs.file_name }}" "${{ github.event.inputs.file_url }}"
-          echo "✅ Download completed:"
-          ls -lh "${{ github.event.inputs.file_name }}"
+          echo "Downloading from: ${{ inputs.file_url }}"
+          echo "Saving as: ${{ inputs.file_name }}"
+          wget -c --progress=dot:giga -O "${{ inputs.file_name }}" "${{ inputs.file_url }}"
+          ls -lh "${{ inputs.file_name }}"
 
-      - name: Split file into chunks
+      - name: Split into chunks (safe method)
         run: |
-          echo "Splitting ${{ github.event.inputs.file_name }} into ${{ github.event.inputs.chunk_size_mb }}MB chunks..."
-          split -b ${{ github.event.inputs.chunk_size_mb }}m "${{ github.event.inputs.file_name }}" part_
+          echo "Splitting ${{ inputs.file_name }} into ${{ inputs.chunk_size_mb }}MB chunks..."
+          # استفاده از -- برای جلوگیری از اشتباه گرفتن文件名 با آپشن
+          split -b "${{ inputs.chunk_size_mb }}m" -- "${{ inputs.file_name }}" "part_"
           
+          # Rename files to have numeric names
           n=1
-          for f in part_*; do 
-            mv "$f" "$(printf "%03d" $n).part"
+          for f in part_*; do
+            mv -- "$f" "$(printf "%03d" $n).part"
             n=$((n+1))
           done
           
-          sha256sum "${{ github.event.inputs.file_name }}" > checksum.txt
+          # Create checksum
+          sha256sum -- "${{ inputs.file_name }}" > checksum.txt
           
-          cat > reassemble.sh << EOF
+          # Create reassemble script
+          cat > reassemble.sh << 'EOF'
           #!/bin/bash
-          echo "Reassembling ${{ github.event.inputs.file_name }}..."
-          cat *.part > "${{ github.event.inputs.file_name }}"
+          set -e
+          echo "Reassembling file..."
+          cat *.part > "reconstructed_file"
           echo "Verifying..."
           sha256sum -c checksum.txt
-          if [ \$? -eq 0 ]; then
-            echo "✅ Success!"
-            ls -lh "${{ github.event.inputs.file_name }}"
+          if [ $? -eq 0 ]; then
+             mv "reconstructed_file" "$(cat checksum.txt | cut -d ' ' -f 3-)"
+             echo "✅ Success! File is intact."
+             ls -lh "$(cat checksum.txt | cut -d ' ' -f 3-)"
           else
-            echo "❌ Error: File corrupted"
+             echo "❌ Error: File corrupted. Checksum mismatch."
+             exit 1
           fi
           EOF
           chmod +x reassemble.sh
           
-          TOTAL_CHUNKS=\$(ls *.part | wc -l)
-          echo "Total chunks created: \$TOTAL_CHUNKS"
+          echo "Total chunks created: $(ls *.part | wc -l)"
 
-      - name: Create or reset target branch
+      - name: Setup branch and push
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout --orphan ${{ github.event.inputs.branch_name }}
+          git checkout --orphan "${{ inputs.branch_name }}"
           git rm -rf . 2>/dev/null || true
-
-      - name: Upload chunks in batches of 5
-        run: |
-          git add checksum.txt reassemble.sh
-          git commit -m "Add metadata for ${{ github.event.inputs.file_name }}"
-          git push origin ${{ github.event.inputs.branch_name }} --force
-          
-          files=()
-          count=0
-          for f in *.part; do
-            files+=("\$f")
-            count=\$((count+1))
-            if [ \$count -eq 5 ]; then
-              git add "\${files[@]}"
-              git commit -m "Add chunks batch \$(date +%s)"
-              git push origin ${{ github.event.inputs.branch_name }}
-              files=()
-              count=0
-            fi
-          done
-          
-          if [ \$count -gt 0 ]; then
-            git add "\${files[@]}"
-            git commit -m "Add remaining chunks for ${{ github.event.inputs.file_name }}"
-            git push origin ${{ github.event.inputs.branch_name }}
-          fi
+          git add checksum.txt reassemble.sh *.part
+          git commit -m "Add file: ${{ inputs.file_name }}"
+          git push origin "${{ inputs.branch_name }}" --force
           
           echo "=========================================="
-          echo "✅✅✅ ALL CHUNKS UPLOADED SUCCESSFULLY! ✅✅✅"
-          echo "Branch name: ${{ github.event.inputs.branch_name }}"
-          echo "To download on your system, run:"
-          echo "git clone --branch ${{ github.event.inputs.branch_name }} https://github.com/${{ github.repository }}.git downloaded-files"
-          echo "cd downloaded-files"
+          echo "✅ Successfully uploaded to branch: ${{ inputs.branch_name }}"
+          echo "To download on your system:"
+          echo "git clone --branch ${{ inputs.branch_name }} https://github.com/${{ github.repository }}.git download-folder"
+          echo "cd download-folder"
           echo "bash reassemble.sh"
           echo "=========================================="
