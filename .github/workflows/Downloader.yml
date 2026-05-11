@@ -4,11 +4,11 @@ on:
   workflow_dispatch:
     inputs:
       file_url:
-        description: 'لینک مستقیم فایل مورد نظر (مثل: https://example.com/file.bin)'
+        description: 'لینک مستقیم فایل مورد نظر'
         required: true
         type: string
       file_name:
-        description: 'نام فایل خروجی (مثل: model.safetensors)'
+        description: 'نام فایل خروجی (مثل model.safetensors)'
         required: true
         type: string
       chunk_size_mb:
@@ -17,9 +17,9 @@ on:
         default: '95'
         type: string
       branch_name:
-        description: 'نام برنچ مقصد (پیشنهاد: model-files)'
+        description: 'نام برنچ مقصد (اختیاری، پیش‌فرض: اسم فایل)'
         required: false
-        default: 'model-files'
+        default: ''
         type: string
 
 jobs:
@@ -52,7 +52,6 @@ jobs:
         run: |
           FILE_NAME="${{ github.event.inputs.file_name }}"
           CHUNK_SIZE="${{ github.event.inputs.chunk_size_mb }}"
-          BRANCH_NAME="${{ github.event.inputs.branch_name }}"
           
           echo "Splitting $FILE_NAME into ${CHUNK_SIZE}MB chunks..."
           split -b ${CHUNK_SIZE}m "$FILE_NAME" chunk_
@@ -94,7 +93,7 @@ jobs:
           Chunk size: ${CHUNK_SIZE}MB
           Total chunks: ${TOTAL_CHUNKS}
           Date: $(date)
-          Branch: ${BRANCH_NAME}
+          Branch: ${{ github.event.inputs.branch_name }}
           EOF
 
       - name: Create/switch to target branch
@@ -102,7 +101,14 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          BRANCH="${{ github.event.inputs.branch_name }}"
+          # Use custom branch name or default to file name
+          if [ -z "${{ github.event.inputs.branch_name }}" ]; then
+            BRANCH="${{ github.event.inputs.file_name }}"
+          else
+            BRANCH="${{ github.event.inputs.branch_name }}"
+          fi
+          
+          echo "BRANCH_NAME=$BRANCH" >> $GITHUB_ENV
           
           # Check if branch exists
           if git ls-remote --heads origin "$BRANCH" | grep -q "$BRANCH"; then
@@ -112,26 +118,30 @@ jobs:
             rm -rf .github 2>/dev/null || true
           fi
 
-      - name: Upload chunks in batches
+      - name: Upload metadata first
         run: |
           FILE_NAME="${{ github.event.inputs.file_name }}"
-          BRANCH="${{ github.event.inputs.branch_name }}"
           
-          # First, upload checksum, script, and info
           git add "${FILE_NAME}.checksum.txt" "reassemble_${FILE_NAME}.sh" "info_${FILE_NAME}.txt"
           git commit -m "Add metadata for ${FILE_NAME}" || echo "No metadata to commit"
-          git push origin "$BRANCH"
+          git push origin "$BRANCH_NAME"
+
+      - name: Upload chunks in batches of 2 (to avoid HTTP 408)
+        run: |
+          FILE_NAME="${{ github.event.inputs.file_name }}"
           
-          # Upload chunks in batches of 5
+          # Upload chunks in batches of 2 (each ~190MB)
           files=()
           count=0
           for f in ${FILE_NAME}_part_*.part; do
             files+=("$f")
             count=$((count+1))
-            if [ $count -eq 5 ]; then
+            if [ $count -eq 2 ]; then
               git add "${files[@]}"
               git commit -m "Add chunks for ${FILE_NAME} - batch $(date +%s)"
-              git push origin "$BRANCH"
+              git push origin "$BRANCH_NAME"
+              # Wait a moment to avoid overwhelming the connection
+              sleep 2
               files=()
               count=0
             fi
@@ -141,15 +151,15 @@ jobs:
           if [ $count -gt 0 ]; then
             git add "${files[@]}"
             git commit -m "Add remaining chunks for ${FILE_NAME}"
-            git push origin "$BRANCH"
+            git push origin "$BRANCH_NAME"
           fi
           
           echo "=========================================="
-          echo "✅ DONE! All chunks for ${FILE_NAME} uploaded to branch: ${BRANCH}"
+          echo "✅ DONE! All chunks uploaded to branch: ${{ env.BRANCH_NAME }}"
           echo "=========================================="
           echo ""
-          echo "📥 Download instructions:"
-          echo "git clone --branch ${BRANCH} https://github.com/${{ github.repository }}.git downloaded-files"
+          echo "📥 Download on your system:"
+          echo "git clone --branch ${{ env.BRANCH_NAME }} https://github.com/${{ github.repository }}.git downloaded-files"
           echo "cd downloaded-files"
           echo "bash reassemble_${FILE_NAME}.sh"
           echo "=========================================="
