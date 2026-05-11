@@ -38,23 +38,19 @@ jobs:
           wget -c --progress=dot:giga -O "${{ inputs.file_name }}" "${{ inputs.file_url }}"
           ls -lh "${{ inputs.file_name }}"
 
-      - name: Split into chunks (safe method)
+      - name: Split into chunks
         run: |
           echo "Splitting ${{ inputs.file_name }} into ${{ inputs.chunk_size_mb }}MB chunks..."
-          # استفاده از -- برای جلوگیری از اشتباه گرفتن文件名 با آپشن
           split -b "${{ inputs.chunk_size_mb }}m" -- "${{ inputs.file_name }}" "part_"
           
-          # Rename files to have numeric names
           n=1
           for f in part_*; do
             mv -- "$f" "$(printf "%03d" $n).part"
             n=$((n+1))
           done
           
-          # Create checksum
           sha256sum -- "${{ inputs.file_name }}" > checksum.txt
           
-          # Create reassemble script
           cat > reassemble.sh << 'EOF'
           #!/bin/bash
           set -e
@@ -64,29 +60,59 @@ jobs:
           sha256sum -c checksum.txt
           if [ $? -eq 0 ]; then
              mv "reconstructed_file" "$(cat checksum.txt | cut -d ' ' -f 3-)"
-             echo "✅ Success! File is intact."
+             echo "✅ Success!"
              ls -lh "$(cat checksum.txt | cut -d ' ' -f 3-)"
           else
-             echo "❌ Error: File corrupted. Checksum mismatch."
+             echo "❌ Error: File corrupted"
              exit 1
           fi
           EOF
           chmod +x reassemble.sh
           
-          echo "Total chunks created: $(ls *.part | wc -l)"
+          echo "Total chunks: $(ls *.part | wc -l)"
 
-      - name: Setup branch and push
+      - name: Setup orphan branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git checkout --orphan "${{ inputs.branch_name }}"
           git rm -rf . 2>/dev/null || true
-          git add checksum.txt reassemble.sh *.part
-          git commit -m "Add file: ${{ inputs.file_name }}"
+
+      - name: Upload metadata first
+        run: |
+          git add checksum.txt reassemble.sh
+          git commit -m "Add metadata for ${{ inputs.file_name }}"
           git push origin "${{ inputs.branch_name }}" --force
+
+      - name: Upload chunks in batches of 2 (to avoid HTTP 500)
+        run: |
+          files=()
+          count=0
+          for f in *.part; do
+            files+=("$f")
+            count=$((count+1))
+            if [ $count -eq 2 ]; then
+              git add "${files[@]}"
+              git commit -m "Add chunks batch $(date +%s)"
+              git push origin "${{ inputs.branch_name }}"
+              echo "✅ Uploaded batch of 2 chunks"
+              # صبر کن تا اتصال پایدار بمونه
+              sleep 5
+              files=()
+              count=0
+            fi
+          done
+          
+          # باقیمانده فایل‌ها
+          if [ $count -gt 0 ]; then
+            git add "${files[@]}"
+            git commit -m "Add remaining chunks for ${{ inputs.file_name }}"
+            git push origin "${{ inputs.branch_name }}"
+          fi
           
           echo "=========================================="
-          echo "✅ Successfully uploaded to branch: ${{ inputs.branch_name }}"
+          echo "✅ ALL CHUNKS UPLOADED SUCCESSFULLY!"
+          echo "=========================================="
           echo "To download on your system:"
           echo "git clone --branch ${{ inputs.branch_name }} https://github.com/${{ github.repository }}.git download-folder"
           echo "cd download-folder"
