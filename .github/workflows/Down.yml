@@ -1,4 +1,4 @@
-name: Stable Download and Split Any File new
+name: Stable Download and Split Any File New
 
 on:
   workflow_dispatch:
@@ -90,9 +90,13 @@ jobs:
           
           if git ls-remote --heads origin "${{ inputs.branch_name }}" | grep -q "${{ inputs.branch_name }}"; then
             echo "Branch exists, checking out..."
+            # پاک کردن فایل‌های محلی که با برنچ تداخل دارند
+            git clean -fd
+            git reset --hard HEAD
             git fetch origin "${{ inputs.branch_name }}"
             git checkout "${{ inputs.branch_name }}"
           else
+            echo "Creating new orphan branch..."
             git checkout --orphan "${{ inputs.branch_name }}"
             git rm -rf . 2>/dev/null || true
           fi
