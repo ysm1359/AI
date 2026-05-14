@@ -45,24 +45,20 @@ jobs:
             ls -lh "${{ inputs.file_name }}"
           fi
 
-      - name: Split into chunks
+      - name: Split into chunks (ALWAYS recreate chunks from source file)
         run: |
-          if [ -f "001.part" ]; then
-            echo "✅ Chunks already exist, skipping split"
-          else
-            echo "Splitting ${{ inputs.file_name }} into ${{ inputs.chunk_size_mb }}MB chunks..."
-            split -b "${{ inputs.chunk_size_mb }}m" -- "${{ inputs.file_name }}" "part_"
-            
-            n=1
-            for f in part_*; do
-              mv -- "$f" "$(printf "%03d" $n).part"
-              n=$((n+1))
-            done
-            
-            sha256sum -- "${{ inputs.file_name }}" > checksum.txt
-          fi
+          echo "Splitting ${{ inputs.file_name }} into ${{ inputs.chunk_size_mb }}MB chunks..."
+          rm -f *.part 2>/dev/null
+          split -b "${{ inputs.chunk_size_mb }}m" -- "${{ inputs.file_name }}" "part_"
           
-          # reassemble.sh را همیشه جدا از if-else بساز
+          n=1
+          for f in part_*; do
+            mv -- "$f" "$(printf "%03d" $n).part"
+            n=$((n+1))
+          done
+          
+          sha256sum -- "${{ inputs.file_name }}" > checksum.txt
+          
           cat > reassemble.sh << 'EOF'
           #!/bin/bash
           set -e
@@ -83,96 +79,54 @@ jobs:
           
           echo "Total chunks: $(ls *.part 2>/dev/null | wc -l)"
 
-      - name: Setup orphan branch
+      - name: Setup branch and upload everything from scratch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          if git ls-remote --heads origin "${{ inputs.branch_name }}" | grep -q "${{ inputs.branch_name }}"; then
-            echo "Branch exists, checking out..."
-            # پاک کردن فایل‌های محلی که با برنچ تداخل دارند
-            git clean -fd
-            git reset --hard HEAD
-            git fetch origin "${{ inputs.branch_name }}"
-            git checkout "${{ inputs.branch_name }}"
-          else
-            echo "Creating new orphan branch..."
-            git checkout --orphan "${{ inputs.branch_name }}"
-            git rm -rf . 2>/dev/null || true
-          fi
-
-      - name: Upload metadata first
-        run: |
-          if ! git ls-files --error-unmatch checksum.txt >/dev/null 2>&1; then
-            git add checksum.txt reassemble.sh
-            git commit -m "Add metadata for ${{ inputs.file_name }}"
-            git push origin "${{ inputs.branch_name }}" --force
-          fi
-
-      - name: Upload chunks one by one (with resume)
-        run: |
-          # پیدا کردن آخرین قطعه آپلود شده
-          last_chunk=""
-          for f in $(ls *.part 2>/dev/null | sort); do
-            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
-              last_chunk="$f"
-              echo "✅ Already uploaded: $f"
-            fi
-          done
+          # حذف برنچ قدیمی و ساخت دوباره
+          git push origin --delete "${{ inputs.branch_name }}" 2>/dev/null || true
+          git checkout --orphan "${{ inputs.branch_name }}"
+          git rm -rf . 2>/dev/null || true
           
-          if [ -n "$last_chunk" ]; then
-            echo "Last uploaded chunk: $last_chunk"
-          fi
+          # آپلود متادیتا
+          git add checksum.txt reassemble.sh
+          git commit -m "Add metadata for ${{ inputs.file_name }}"
+          git push origin "${{ inputs.branch_name }}" --force
           
-          # شروع از قطعه بعدی
-          start_uploading=false
-          if [ -z "$last_chunk" ]; then
-            start_uploading=true
-          fi
-          
-          # آپلود تک تک با قابلیت ادامه
-          for f in $(ls *.part 2>/dev/null | sort); do
-            if [ "$f" = "$last_chunk" ]; then
-              start_uploading=true
-              continue
+          # آپلود تک تک قطعه‌ها
+          for f in $(ls *.part | sort); do
+            echo "Uploading: $f"
+            git add "$f"
+            git commit -m "Add $f"
+            
+            max_retries=5
+            retry=0
+            while [ $retry -lt $max_retries ]; do
+              if git push origin "${{ inputs.branch_name }}"; then
+                echo "✅ Uploaded: $f"
+                break
+              else
+                retry=$((retry+1))
+                if [ $retry -lt $max_retries ]; then
+                  echo "⚠️ Retry $retry/$max_retries in 15 seconds..."
+                  sleep 15
+                fi
+              fi
+            done
+            
+            if [ $retry -eq $max_retries ]; then
+              echo "❌ Failed to upload $f"
+              exit 1
             fi
             
-            if [ "$start_uploading" = true ]; then
-              echo "Uploading: $f"
-              git add "$f"
-              git commit -m "Add $f"
-              
-              # تلاش مجدد در صورت خطا
-              max_retries=5
-              retry=0
-              while [ $retry -lt $max_retries ]; do
-                if git push origin "${{ inputs.branch_name }}"; then
-                  echo "✅ Uploaded: $f"
-                  break
-                else
-                  retry=$((retry+1))
-                  if [ $retry -lt $max_retries ]; then
-                    echo "⚠️ Retry $retry/$max_retries in 15 seconds..."
-                    sleep 15
-                  fi
-                fi
-              done
-              
-              if [ $retry -eq $max_retries ]; then
-                echo "❌ Failed to upload $f, will continue from here next time"
-                exit 1
-              fi
-              
-              # صبر بین آپلودها برای جلوگیری از محدودیت
-              sleep 10
-            fi
+            sleep 10
           done
           
           echo "=========================================="
           echo "✅ ALL CHUNKS UPLOADED SUCCESSFULLY!"
           echo "=========================================="
-          echo "To download on your system:"
+          echo "To download:"
           echo "git clone --branch ${{ inputs.branch_name }} https://github.com/${{ github.repository }}.git download-folder"
-          echo "cd download-folder"
-          echo "bash reassemble.sh"
+          echo "cd download-folder && bash reassemble.sh"
           echo "=========================================="
