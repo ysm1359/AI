@@ -1,0 +1,165 @@
+name: Split and Upload Large Model to Git Branch With Resume
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch_name:
+        description: 'نام برنچ (مثلا model-files)'
+        required: true
+        default: 'model-files'
+
+jobs:
+  split-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # مهم: کل تاریخچه برای دیدن فایل‌های موجود
+
+      - name: Check if file already exists and resume
+        run: |
+          # بررسی کنیم آیا فایل اصلی از قبل دانلود شده؟
+          if [ -f "model.safetensors" ]; then
+            echo "✅ Model file already exists, skipping download"
+            ls -lh model.safetensors
+          else
+            echo "Downloading model..."
+            wget -c -O model.safetensors "https://modelscope.cn/models/ACE-Step/acestep-v15-base/resolve/master/model.safetensors"
+            ls -lh model.safetensors
+          fi
+
+      - name: Split into chunks (if not already split)
+        run: |
+          # فقط اگر قطعه‌ها وجود ندارند، split کن
+          if [ -f "part_001.part" ]; then
+            echo "✅ Chunks already exist, skipping split"
+          else
+            echo "Splitting file into 95MB chunks..."
+            split -b 95m model.safetensors part_
+            
+            n=1
+            for f in part_*; do 
+              mv "$f" "$(printf "part_%03d.part" $n)"
+              n=$((n+1))
+            done
+            
+            sha256sum model.safetensors > checksum.txt
+            
+            cat > reassemble.sh << 'EOF'
+            #!/bin/bash
+            echo "Reassembling model.safetensors..."
+            cat part_*.part > model.safetensors
+            echo "Verifying..."
+            sha256sum -c checksum.txt
+            if [ $? -eq 0 ]; then
+              echo "✅ Success!"
+              ls -lh model.safetensors
+            else
+              echo "❌ Error: File corrupted"
+            fi
+            EOF
+            chmod +x reassemble.sh
+          fi
+          
+          echo "Total chunks: $(ls part_*.part 2>/dev/null | wc -l)"
+
+      - name: Setup git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Create or switch to orphan branch
+        run: |
+          # اگر برنچ وجود دارد، آن را checkout کن
+          if git ls-remote --heads origin ${{ github.event.inputs.branch_name }} | grep -q ${{ github.event.inputs.branch_name }}; then
+            echo "Branch exists, checking out..."
+            git fetch origin ${{ github.event.inputs.branch_name }}
+            git checkout ${{ github.event.inputs.branch_name }}
+          else
+            echo "Creating new orphan branch..."
+            git checkout --orphan ${{ github.event.inputs.branch_name }}
+            rm -rf .github 2>/dev/null || true
+          fi
+
+      - name: Upload checksum and script (if missing)
+        run: |
+          # فقط اگر checksum موجود نیست اضافه کن
+          if ! git ls-files --error-unmatch checksum.txt >/dev/null 2>&1; then
+            git add checksum.txt reassemble.sh 2>/dev/null || true
+            git commit -m "Add checksum and reassemble script" || true
+            git push origin ${{ github.event.inputs.branch_name }} --force
+          fi
+
+      - name: Upload chunks one by one with retry
+        run: |
+          # پیدا کردن آخرین قطعه آپلود شده
+          last_chunk=""
+          for f in $(ls part_*.part | sort); do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              last_chunk="$f"
+              echo "✅ Already uploaded: $f"
+            else
+              break
+            fi
+          done
+          
+          if [ -n "$last_chunk" ]; then
+            echo "Last uploaded chunk: $last_chunk"
+          fi
+          
+          # شروع از قطعه بعدی
+          start_uploading=false
+          if [ -z "$last_chunk" ]; then
+            start_uploading=true
+          fi
+          
+          files=()
+          count=0
+          for f in $(ls part_*.part | sort); do
+            # اگر به آخرین قطعه رسیدیم، شروع کن
+            if [ "$f" = "$last_chunk" ]; then
+              start_uploading=true
+              continue
+            fi
+            
+            if [ "$start_uploading" = true ]; then
+              files+=("$f")
+              count=$((count+1))
+              
+              # هر بار فقط 1 قطعه (نه 2 تا) برای جلوگیری از timeout
+              echo "Uploading: $f"
+              git add "$f"
+              git commit -m "Add $f"
+              
+              # با retry آپلود کن
+              max_retries=3
+              retry=0
+              while [ $retry -lt $max_retries ]; do
+                if git push origin ${{ github.event.inputs.branch_name }}; then
+                  echo "✅ Successfully uploaded: $f"
+                  break
+                else
+                  retry=$((retry+1))
+                  echo "⚠️ Push failed, retry $retry/$max_retries in 10 seconds..."
+                  sleep 10
+                fi
+              done
+              
+              if [ $retry -eq $max_retries ]; then
+                echo "❌ Failed to upload $f after $max_retries retries"
+                exit 1
+              fi
+              
+              # صبر بین آپلودها
+              sleep 3
+              files=()
+              count=0
+            fi
+          done
+          
+          echo "=========================================="
+          echo "✅ ALL CHUNKS UPLOADED SUCCESSFULLY!"
+          echo "=========================================="
