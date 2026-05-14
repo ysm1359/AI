@@ -1,4 +1,4 @@
-name: Stable Download and Split Any File New
+name: Stable Download and Split Any File new
 
 on:
   workflow_dispatch:
@@ -60,25 +60,26 @@ jobs:
             done
             
             sha256sum -- "${{ inputs.file_name }}" > checksum.txt
-            
-            cat > reassemble.sh << 'EOF'
-            #!/bin/bash
-            set -e
-            echo "Reassembling file..."
-            cat *.part > "reconstructed_file"
-            echo "Verifying..."
-            sha256sum -c checksum.txt
-            if [ $? -eq 0 ]; then
-               mv "reconstructed_file" "$(cat checksum.txt | cut -d ' ' -f 3-)"
-               echo "✅ Success!"
-               ls -lh "$(cat checksum.txt | cut -d ' ' -f 3-)"
-            else
-               echo "❌ Error: File corrupted"
-               exit 1
-            fi
-            EOF
-            chmod +x reassemble.sh
           fi
+          
+          # reassemble.sh را همیشه جدا از if-else بساز
+          cat > reassemble.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          echo "Reassembling file..."
+          cat *.part > "reconstructed_file"
+          echo "Verifying..."
+          sha256sum -c checksum.txt
+          if [ $? -eq 0 ]; then
+             mv "reconstructed_file" "$(cat checksum.txt | cut -d ' ' -f 3-)"
+             echo "✅ Success!"
+             ls -lh "$(cat checksum.txt | cut -d ' ' -f 3-)"
+          else
+             echo "❌ Error: File corrupted"
+             exit 1
+          fi
+          EOF
+          chmod +x reassemble.sh
           
           echo "Total chunks: $(ls *.part 2>/dev/null | wc -l)"
 
