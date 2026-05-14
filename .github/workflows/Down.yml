@@ -1,4 +1,4 @@
-name: Stable Download and Split Any File New
+name: Stable Download and Split Any File
 
 on:
   workflow_dispatch:
@@ -17,136 +17,156 @@ on:
         type: string
         default: 'downloads'
       chunk_size_mb:
-        description: 'سایز هر قطعه (MB) - حداکثر 48 پیشنهاد می‌شود'
+        description: 'سایز هر قطعه (MB)'
         required: false
         type: string
-        default: '48'
+        default: '95'
 
 jobs:
   process:
     runs-on: ubuntu-latest
     permissions:
       contents: write
-
     steps:
       - name: Get the code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download file (with resume)
         run: |
-          echo "Downloading from: ${{ inputs.file_url }}"
-          echo "Saving as: ${{ inputs.file_name }}"
-          wget -c --progress=dot:giga -O "${{ inputs.file_name }}" "${{ inputs.file_url }}"
-          ls -lh "${{ inputs.file_name }}"
+          if [ -f "${{ inputs.file_name }}" ]; then
+            echo "✅ File already exists, skipping download"
+            ls -lh "${{ inputs.file_name }}"
+          else
+            echo "Downloading from: ${{ inputs.file_url }}"
+            echo "Saving as: ${{ inputs.file_name }}"
+            wget -c --progress=dot:giga -O "${{ inputs.file_name }}" "${{ inputs.file_url }}"
+            ls -lh "${{ inputs.file_name }}"
+          fi
 
       - name: Split into chunks
         run: |
-          echo "Splitting ${{ inputs.file_name }} into ${{ inputs.chunk_size_mb }}MB chunks..."
-          split -b "${{ inputs.chunk_size_mb }}m" -- "${{ inputs.file_name }}" "part_"
+          if [ -f "001.part" ]; then
+            echo "✅ Chunks already exist, skipping split"
+          else
+            echo "Splitting ${{ inputs.file_name }} into ${{ inputs.chunk_size_mb }}MB chunks..."
+            split -b "${{ inputs.chunk_size_mb }}m" -- "${{ inputs.file_name }}" "part_"
+            
+            n=1
+            for f in part_*; do
+              mv -- "$f" "$(printf "%03d" $n).part"
+              n=$((n+1))
+            done
+            
+            sha256sum -- "${{ inputs.file_name }}" > checksum.txt
+            
+            cat > reassemble.sh << 'EOF'
+            #!/bin/bash
+            set -e
+            echo "Reassembling file..."
+            cat *.part > "reconstructed_file"
+            echo "Verifying..."
+            sha256sum -c checksum.txt
+            if [ $? -eq 0 ]; then
+               mv "reconstructed_file" "$(cat checksum.txt | cut -d ' ' -f 3-)"
+               echo "✅ Success!"
+               ls -lh "$(cat checksum.txt | cut -d ' ' -f 3-)"
+            else
+               echo "❌ Error: File corrupted"
+               exit 1
+            fi
+            EOF
+            chmod +x reassemble.sh
+          fi
           
-          n=1
-          for f in part_*; do
-            mv -- "$f" "$(printf "%03d" $n).part"
-            n=$((n+1))
-          done
-          
-          sha256sum -- "${{ inputs.file_name }}" > checksum.txt
-          
-          cat > reassemble.sh << 'EOF'
-#!/bin/bash
-set -e
-echo "Reassembling file..."
-cat *.part > "reconstructed_file"
-echo "Verifying checksum..."
-sha256sum -c checksum.txt
-if [ $? -eq 0 ]; then
-   mv "reconstructed_file" "$(cat checksum.txt | cut -d ' ' -f 3-)"
-   echo "✅ Success! File reassembled successfully."
-   ls -lh "$(cat checksum.txt | cut -d ' ' -f 3-)"
-else
-   echo "❌ Error: File corrupted"
-   exit 1
-fi
-EOF
-          chmod +x reassemble.sh
-          
-          echo "Total chunks: $(ls *.part | wc -l)"
+          echo "Total chunks: $(ls *.part 2>/dev/null | wc -l)"
 
       - name: Setup orphan branch
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           
-          # تنظیمات مهم برای جلوگیری از timeout
-          git config http.postBuffer 524288000
-          git config http.version HTTP/1.1
-          git config --global core.compression 0
-          
-          git checkout --orphan "${{ inputs.branch_name }}"
-          git rm -rf . 2>/dev/null || true
+          if git ls-remote --heads origin "${{ inputs.branch_name }}" | grep -q "${{ inputs.branch_name }}"; then
+            echo "Branch exists, checking out..."
+            git fetch origin "${{ inputs.branch_name }}"
+            git checkout "${{ inputs.branch_name }}"
+          else
+            git checkout --orphan "${{ inputs.branch_name }}"
+            git rm -rf . 2>/dev/null || true
+          fi
 
       - name: Upload metadata first
         run: |
-          git add checksum.txt reassemble.sh
-          git commit -m "Add metadata for ${{ inputs.file_name }}"
-          git push origin "${{ inputs.branch_name }}" --force
+          if ! git ls-files --error-unmatch checksum.txt >/dev/null 2>&1; then
+            git add checksum.txt reassemble.sh
+            git commit -m "Add metadata for ${{ inputs.file_name }}"
+            git push origin "${{ inputs.branch_name }}" --force
+          fi
 
-      - name: Upload chunks with retry and delay
+      - name: Upload chunks one by one (with resume)
         run: |
-          echo "Starting chunk upload with optimized settings..."
-          
-          files=()
-          count=0
-          BATCH_SIZE=3
-          
-          for f in *.part; do
-            files+=("$f")
-            count=$((count+1))
-            
-            if [ $count -eq $BATCH_SIZE ]; then
-              echo "Uploading batch of $BATCH_SIZE chunks: ${files[*]}"
-              
-              git add "${files[@]}"
-              git commit -m "Add chunks batch $(date +%s)"
-              
-              # Push with retry
-              for attempt in {1..3}; do
-                if git push origin "${{ inputs.branch_name }}"; then
-                  echo "✅ Batch uploaded successfully"
-                  break
-                else
-                  echo "❌ Push failed (attempt $attempt/3). Retrying in 12 seconds..."
-                  sleep 12
-                fi
-              done
-              
-              sleep 10
-              files=()
-              count=0
+          # پیدا کردن آخرین قطعه آپلود شده
+          last_chunk=""
+          for f in $(ls *.part 2>/dev/null | sort); do
+            if git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              last_chunk="$f"
+              echo "✅ Already uploaded: $f"
             fi
           done
           
-          # Upload remaining files
-          if [ $count -gt 0 ]; then
-            echo "Uploading remaining $count chunks: ${files[*]}"
-            git add "${files[@]}"
-            git commit -m "Add remaining chunks for ${{ inputs.file_name }}"
-            
-            for attempt in {1..3}; do
-              if git push origin "${{ inputs.branch_name }}"; then
-                echo "✅ Remaining chunks uploaded successfully"
-                break
-              else
-                echo "❌ Final push failed (attempt $attempt/3). Retrying..."
-                sleep 15
-              fi
-            done
+          if [ -n "$last_chunk" ]; then
+            echo "Last uploaded chunk: $last_chunk"
           fi
+          
+          # شروع از قطعه بعدی
+          start_uploading=false
+          if [ -z "$last_chunk" ]; then
+            start_uploading=true
+          fi
+          
+          # آپلود تک تک با قابلیت ادامه
+          for f in $(ls *.part 2>/dev/null | sort); do
+            if [ "$f" = "$last_chunk" ]; then
+              start_uploading=true
+              continue
+            fi
+            
+            if [ "$start_uploading" = true ]; then
+              echo "Uploading: $f"
+              git add "$f"
+              git commit -m "Add $f"
+              
+              # تلاش مجدد در صورت خطا
+              max_retries=5
+              retry=0
+              while [ $retry -lt $max_retries ]; do
+                if git push origin "${{ inputs.branch_name }}"; then
+                  echo "✅ Uploaded: $f"
+                  break
+                else
+                  retry=$((retry+1))
+                  if [ $retry -lt $max_retries ]; then
+                    echo "⚠️ Retry $retry/$max_retries in 15 seconds..."
+                    sleep 15
+                  fi
+                fi
+              done
+              
+              if [ $retry -eq $max_retries ]; then
+                echo "❌ Failed to upload $f, will continue from here next time"
+                exit 1
+              fi
+              
+              # صبر بین آپلودها برای جلوگیری از محدودیت
+              sleep 10
+            fi
+          done
           
           echo "=========================================="
           echo "✅ ALL CHUNKS UPLOADED SUCCESSFULLY!"
           echo "=========================================="
-          echo "برای دانلود و بازسازی فایل:"
+          echo "To download on your system:"
           echo "git clone --branch ${{ inputs.branch_name }} https://github.com/${{ github.repository }}.git download-folder"
           echo "cd download-folder"
           echo "bash reassemble.sh"
