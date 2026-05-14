@@ -1,4 +1,4 @@
-name: Stable Download and Split Any File
+name: Stable Download and Split Any File Resume
 
 on:
   workflow_dispatch:
